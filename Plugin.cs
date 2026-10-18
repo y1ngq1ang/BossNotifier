@@ -404,7 +404,6 @@ namespace BossNotifier
 
             // IL2CPP plugins cannot define MonoBehaviours out of the box: the game's il2cpp
             // runtime has to be told about them before AddComponent can use them.
-            ClassInjector.RegisterTypeInIl2Cpp<Billboard>();
             ClassInjector.RegisterTypeInIl2Cpp<BossNotifierMono>();
 
             // Enable patches
@@ -837,49 +836,21 @@ namespace BossNotifier
     }
     #endregion
 
-    #region Billboard Component
-    // Billboard component - makes object always face the camera
-    public class Billboard : MonoBehaviour
-    {
-        // Injected IL2CPP classes need this constructor; the game never calls it directly.
-        public Billboard(IntPtr ptr) : base(ptr) { }
-
-        private Camera _mainCamera;
-
-        private void Start()
-        {
-            _mainCamera = Camera.main;
-        }
-
-        private void LateUpdate()
-        {
-            if (_mainCamera != null)
-            {
-                transform.rotation = _mainCamera.transform.rotation;
-            }
-        }
-    }
-    #endregion
-
     #region BossMarkerInfo
-    // Class to hold marker information
+    // Class to hold marker information. The marker itself is drawn in OnGUI: legacy
+    // UnityEngine.TextMesh has no registered IL2CPP class pointer in this build, so world
+    // space text objects cannot be created at all.
     public class BossMarkerInfo
     {
         public Player Player { get; set; }
         public string BossName { get; set; }      // Display name (shown on marker)
         public string GroupName { get; set; }     // Group name (for death tracking/notifications)
-        public GameObject MarkerObject { get; set; }
-        public TextMesh SymbolTextMesh { get; set; }
-        public TextMesh InfoTextMesh { get; set; }
 
-        public BossMarkerInfo(Player player, string bossName, string groupName, GameObject markerObject, TextMesh symbolTextMesh, TextMesh infoTextMesh)
+        public BossMarkerInfo(Player player, string bossName, string groupName)
         {
             Player = player;
             BossName = bossName;
             GroupName = groupName;
-            MarkerObject = markerObject;
-            SymbolTextMesh = symbolTextMesh;
-            InfoTextMesh = infoTextMesh;
         }
     }
     #endregion
@@ -901,21 +872,7 @@ namespace BossNotifier
         private Camera _mainCamera;
         private Action<IPlayer> _onPersonAddHandler;
         private float _pendingNotificationDelay = -1f;
-        private static Font _markerFont;
-
-        private static Font MarkerFont
-        {
-            get
-            {
-                if (_markerFont == null)
-                {
-                    // Unity 2022 dropped Arial.ttf ("LegacyRuntime.ttf" is the built-in replacement).
-                    _markerFont = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-                    if (_markerFont == null) _markerFont = Font.CreateDynamicFontFromOSFont("Arial", 64);
-                }
-                return _markerFont;
-            }
-        }
+        private static GUIStyle _markerStyle;
 
         #region Initialization
         public static void Init()
@@ -1068,60 +1025,9 @@ namespace BossNotifier
 
             try
             {
-                // Get group-specific marker settings
-                string markerChar = BossNotifierPlugin.GetMarkerCharacter(groupName);
-                Color markerCol = BossNotifierPlugin.GetMarkerColor(groupName);
-
-                // Create main marker GameObject
-                GameObject markerObj = new GameObject($"BossMarker_{bossName}");
-
-                // Create symbol object (▼) - child of marker
-                GameObject symbolObj = new GameObject("Symbol");
-                symbolObj.transform.SetParent(markerObj.transform);
-                symbolObj.transform.localPosition = Vector3.zero;
-
-                // IL2CPP only ships native metadata for generic methods the game itself used.
-                // "AddComponent<TextMesh>()" has no such instantiation (its MethodInfoStore
-                // throws on first touch, and a failed generic store stays poisoned for every
-                // later call), so go through the non-generic overload with an Il2Cpp type.
-                TextMesh symbolMesh = symbolObj.AddComponent(Il2CppType.Of<TextMesh>()).TryCast<TextMesh>();
-                symbolMesh.font = MarkerFont;
-                symbolMesh.text = markerChar;
-                symbolMesh.fontSize = BossNotifierPlugin.fontSize.Value;
-                symbolMesh.anchor = TextAnchor.MiddleCenter;
-                symbolMesh.alignment = TextAlignment.Center;
-                symbolMesh.color = markerCol;
-                symbolMesh.fontStyle = FontStyle.Bold;
-
-                // Create info object (name + distance) - child of marker, placed above the symbol
-                GameObject infoObj = new GameObject("Info");
-                infoObj.transform.SetParent(markerObj.transform);
-                infoObj.transform.localPosition = new Vector3(0, 0.05f, 0);
-
-                TextMesh infoMesh = infoObj.AddComponent(Il2CppType.Of<TextMesh>()).TryCast<TextMesh>();
-                infoMesh.font = MarkerFont;
-                infoMesh.text = bossName;
-                infoMesh.fontSize = 48;
-                infoMesh.anchor = TextAnchor.LowerCenter;
-                infoMesh.alignment = TextAlignment.Center;
-                infoMesh.color = markerCol;
-                infoMesh.fontStyle = FontStyle.Bold;
-
-                // Add Billboard component to main marker (children follow)
-                markerObj.AddComponent<Billboard>();
-
-                // Set initial scale
-                markerObj.transform.localScale = Vector3.one * BossNotifierPlugin.markerBaseScale.Value;
-
-                // Position above head
-                UpdateMarkerPosition(markerObj, player);
-
-                // Set active based on config
-                markerObj.SetActive(_markersVisible && BossNotifierPlugin.enableMarkers.Value);
-
-                // Store marker info (bossName = display name, groupName = for tracking)
-                var markerInfo = new BossMarkerInfo(player, bossName, groupName, markerObj, symbolMesh, infoMesh);
-                _bossMarkers[player] = markerInfo;
+                // Nothing is instantiated here any more: the marker is drawn from this entry
+                // in OnGUI, which avoids the unavailable TextMesh type entirely.
+                _bossMarkers[player] = new BossMarkerInfo(player, bossName, groupName);
 
                 // Track seen count for plural / custom groups so "all eliminated" only fires once everyone is dead
                 if (BossNotifierPlugin.pluralBosses.Contains(groupName) || BossNotifierPlugin.customBossGroups.Contains(groupName))
@@ -1169,10 +1075,6 @@ namespace BossNotifier
                 // Notify addon of boss death (use GroupName for consistency)
                 BossNotifierPlugin.InvokeOnBossDied(markerInfo.GroupName);
 
-                if (markerInfo.MarkerObject != null)
-                {
-                    Destroy(markerInfo.MarkerObject);
-                }
                 _bossMarkers.Remove(player);
 
                 // FIX: Regenerate notifications after boss death
@@ -1218,15 +1120,14 @@ namespace BossNotifier
             if (BossNotifierPlugin.toggleMarkersKey.Value.IsDown())
             {
                 _markersVisible = !_markersVisible;
-                ToggleAllMarkers(_markersVisible);
                 string status = _markersVisible ? "ON" : "OFF";
                 ShowNotification($"Boss Markers: {status}", ENotificationDurationType.Default);
             }
 
-            // Update markers
-            if (BossNotifierPlugin.enableMarkers.Value && _markersVisible)
+            // Drop markers whose boss is gone; the drawing itself happens in OnGUI.
+            if (_bossMarkers != null && _bossMarkers.Count > 0)
             {
-                UpdateAllMarkers();
+                CleanupDeadMarkers();
             }
         }
 
@@ -1243,165 +1144,112 @@ namespace BossNotifier
                 true);
         }
 
-        private void UpdateAllMarkers()
+        private void CleanupDeadMarkers()
         {
+            List<Player> toRemove = null;
+
+            foreach (var kvp in _bossMarkers)
+            {
+                Player player = kvp.Key;
+                if (player == null) continue;
+                if (player.HealthController != null && !player.HealthController.IsAlive)
+                {
+                    if (toRemove == null) toRemove = new List<Player>();
+                    toRemove.Add(player);
+                }
+            }
+
+            if (toRemove == null) return;
+
+            foreach (Player player in toRemove)
+            {
+                _bossMarkers.Remove(player);
+            }
+        }
+
+        // Markers are drawn as IMGUI labels over the boss's world position. Legacy TextMesh
+        // cannot be used here: it has no registered IL2CPP class pointer in this build. This
+        // matches how the shipped flir.enemymarkers mod draws its labels.
+        public void OnGUI()
+        {
+            if (!BossNotifierPlugin.enableMarkers.Value || !_markersVisible) return;
+            if (_bossMarkers == null || _bossMarkers.Count == 0) return;
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+
             if (_mainCamera == null)
             {
                 _mainCamera = Camera.main;
                 if (_mainCamera == null) return;
             }
 
-            Vector3 playerPos = _mainCamera.transform.position;
-            List<Player> toRemove = new List<Player>();
+            GUISkin skin = GUI.skin;
+            if (skin == null) return;
+
+            if (_markerStyle == null)
+            {
+                _markerStyle = new GUIStyle(skin.label)
+                {
+                    alignment = TextAnchor.MiddleCenter,
+                    fontStyle = FontStyle.Bold,
+                    wordWrap = false,
+                    richText = false
+                };
+            }
+
+            // The font size setting is expressed on the old world-space scale (32-128); a
+            // quarter of it reads well as screen pixels. The two scale settings keep
+            // controlling how much the label grows towards the visibility limit.
+            int baseFontPx = Mathf.Clamp(BossNotifierPlugin.fontSize.Value / 4, 8, 40);
+            float growth = Mathf.Clamp(
+                BossNotifierPlugin.markerMaxScale.Value / Mathf.Max(BossNotifierPlugin.markerBaseScale.Value, 0.0001f),
+                1f, 2f);
+
+            Vector3 cameraPos = _mainCamera.transform.position;
+            int visibility = BossNotifierPlugin.visibilityDistance.Value;
 
             foreach (var kvp in _bossMarkers)
             {
-                var player = kvp.Key;
-                var markerInfo = kvp.Value;
+                Player player = kvp.Key;
+                BossMarkerInfo info = kvp.Value;
+                if (player == null || info == null) continue;
+                if (player.HealthController != null && !player.HealthController.IsAlive) continue;
 
-                // Check if player/marker still valid
-                if (player == null || markerInfo.MarkerObject == null)
-                {
-                    toRemove.Add(player);
-                    continue;
-                }
+                float distance = Vector3.Distance(cameraPos, player.Position);
+                if (distance > visibility) continue;
 
-                // Check if player is dead
-                if (player.HealthController != null && !player.HealthController.IsAlive)
-                {
-                    toRemove.Add(player);
-                    continue;
-                }
+                if (!BossNotifierPlugin.showThroughWalls.Value && !HasLineOfSight(cameraPos, player, distance)) continue;
 
-                // Calculate distance
-                float distance = Vector3.Distance(playerPos, player.Position);
+                Vector3 screenPos = _mainCamera.WorldToScreenPoint(player.Position + Vector3.up * 2.2f);
+                if (screenPos.z <= 0f) continue;
 
-                // Hide if too far
-                if (distance > BossNotifierPlugin.visibilityDistance.Value)
-                {
-                    markerInfo.MarkerObject.SetActive(false);
-                    continue;
-                }
+                float distanceFactor = Mathf.Clamp01(distance / visibility);
+                _markerStyle.fontSize = Mathf.RoundToInt(baseFontPx * (1f + (growth - 1f) * distanceFactor));
+                _markerStyle.normal.textColor = BossNotifierPlugin.GetMarkerColor(info.GroupName);
 
-                // Line of sight check (if show through walls is disabled)
-                if (!BossNotifierPlugin.showThroughWalls.Value)
-                {
-                    Vector3 bossHeadPos = player.Position + Vector3.up * 1.5f;
-                    Vector3 direction = bossHeadPos - playerPos;
+                string text = BossNotifierPlugin.GetMarkerCharacter(info.GroupName);
+                if (BossNotifierPlugin.showBossName.Value) text += "\n" + info.BossName;
+                if (BossNotifierPlugin.showDistance.Value) text += $"\n{distance:F0}m";
 
-                    int layerMask = (1 << 12) | (1 << 11) | (1 << 16);
-
-                    RaycastHit hit;
-                    if (Physics.Raycast(playerPos, direction.normalized, out hit, distance, layerMask))
-                    {
-                        if (hit.distance < distance - 1f)
-                        {
-                            markerInfo.MarkerObject.SetActive(false);
-                            continue;
-                        }
-                    }
-                }
-
-                // Show marker
-                markerInfo.MarkerObject.SetActive(true);
-
-                // Update position
-                UpdateMarkerPosition(markerInfo.MarkerObject, player);
-
-                // Update scale based on distance
-                UpdateMarkerScale(markerInfo.MarkerObject, distance);
-
-                // Update text (with distance if enabled)
-                UpdateMarkerText(markerInfo, distance);
-            }
-
-            // Clean up dead/invalid markers
-            foreach (var player in toRemove)
-            {
-                if (_bossMarkers.TryGetValue(player, out var markerInfo))
-                {
-                    if (markerInfo.MarkerObject != null)
-                    {
-                        Destroy(markerInfo.MarkerObject);
-                    }
-                    _bossMarkers.Remove(player);
-                }
+                // IMGUI's origin is the top left, screen coordinates start at the bottom.
+                Rect rect = new Rect(screenPos.x - 150f, (Screen.height - screenPos.y) - 60f, 300f, 120f);
+                GUI.Label(rect, text, _markerStyle);
             }
         }
 
-        private void UpdateMarkerPosition(GameObject marker, Player player)
+        private static bool HasLineOfSight(Vector3 cameraPos, Player player, float distance)
         {
-            if (player == null || marker == null) return;
+            Vector3 bossHeadPos = player.Position + Vector3.up * 1.5f;
+            Vector3 direction = bossHeadPos - cameraPos;
 
-            Vector3 headPos = player.Position + Vector3.up * 2.2f;
-            marker.transform.position = headPos;
-        }
+            int layerMask = (1 << 12) | (1 << 11) | (1 << 16);
 
-        private void UpdateMarkerScale(GameObject marker, float distance)
-        {
-            float baseScale = BossNotifierPlugin.markerBaseScale.Value;
-            float maxScale = BossNotifierPlugin.markerMaxScale.Value;
-
-            float scale = baseScale * (1f + distance / 50f);
-            scale = Mathf.Clamp(scale, baseScale, maxScale);
-
-            marker.transform.localScale = Vector3.one * scale;
-        }
-
-        private void UpdateMarkerText(BossMarkerInfo markerInfo, float distance)
-        {
-            // Get group-specific settings
-            string markerChar = BossNotifierPlugin.GetMarkerCharacter(markerInfo.GroupName);
-            Color markerCol = BossNotifierPlugin.GetMarkerColor(markerInfo.GroupName);
-
-            // Update symbol
-            if (markerInfo.SymbolTextMesh != null)
+            RaycastHit hit;
+            if (Physics.Raycast(cameraPos, direction.normalized, out hit, distance, layerMask))
             {
-                markerInfo.SymbolTextMesh.text = markerChar;
-                markerInfo.SymbolTextMesh.fontSize = BossNotifierPlugin.fontSize.Value;
-                markerInfo.SymbolTextMesh.color = markerCol;
+                return hit.distance >= distance - 1f;
             }
 
-            // Update info (name + distance)
-            if (markerInfo.InfoTextMesh != null)
-            {
-                bool showName = BossNotifierPlugin.showBossName.Value;
-                bool showDist = BossNotifierPlugin.showDistance.Value;
-
-                if (showName && showDist)
-                {
-                    markerInfo.InfoTextMesh.text = $"{markerInfo.BossName}\n{distance:F0}m";
-                }
-                else if (showName && !showDist)
-                {
-                    markerInfo.InfoTextMesh.text = markerInfo.BossName;
-                }
-                else if (!showName && showDist)
-                {
-                    markerInfo.InfoTextMesh.text = $"{distance:F0}m";
-                }
-                else
-                {
-                    markerInfo.InfoTextMesh.text = "";
-                }
-
-                markerInfo.InfoTextMesh.color = markerCol;
-
-                float fontSizeRatio = BossNotifierPlugin.fontSize.Value / 64f;
-                float yOffset = 0.05f * fontSizeRatio;
-                markerInfo.InfoTextMesh.transform.localPosition = new Vector3(0, yOffset, 0);
-            }
-        }
-
-        private void ToggleAllMarkers(bool visible)
-        {
-            foreach (var markerInfo in _bossMarkers.Values)
-            {
-                if (markerInfo.MarkerObject != null)
-                {
-                    markerInfo.MarkerObject.SetActive(visible);
-                }
-            }
+            return true;
         }
         #endregion
 
@@ -1570,10 +1418,6 @@ namespace BossNotifier
             {
                 foreach (var markerInfo in _bossMarkers.Values)
                 {
-                    if (markerInfo.MarkerObject != null)
-                    {
-                        Destroy(markerInfo.MarkerObject);
-                    }
                     if (markerInfo.Player != null)
                     {
                         markerInfo.Player.OnPlayerDeadOrUnspawn -= OnBossDeadOrUnspawn;

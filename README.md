@@ -13,7 +13,7 @@ A client mod that notifies you which bosses are present in your raid.
     - Keyboard shortcut (default: O)
     - Show notifications on raid start
     - Intel Center level requirements
-- 🎯 3D markers above bosses (name, distance, per-group symbol and color)
+- 🎯 On-screen markers above bosses (symbol, name, distance, per-group color)
 - 🧩 Custom boss groups loaded from `custom_bosses.json` (RUAF, UNTAR, Black Division)
 - 🆕 SPT 5.0 roles: The Wedge, Black Division, Russian Military, Shadow of Tagilla
   (Labyrinth), Vengeful Killa and Zryachiy's revenge event
@@ -49,9 +49,10 @@ UnityEngine.CoreModule, UnityEngine.PhysicsModule, UnityEngine.TextRenderingModu
 - The runtime MonoBehaviours are registered with
   `Il2CppInterop.Runtime.Injection.ClassInjector.RegisterTypeInIl2Cpp<T>()`; injected
   MonoBehaviour classes need a `(IntPtr ptr) : base(ptr)` constructor.
-- `AddComponent<T>()` only works for types IL2CPP already instantiated. Game types such
-  as `TextMesh` have no generic instantiation, and the failed generic method store stays
-  poisoned for later calls - use `AddComponent(Il2CppType.Of<T>())` instead.
+- `UnityEngine.TextMesh` has no registered IL2CPP class pointer in this build, so markers
+  are drawn as IMGUI labels from `OnGUI` (`GUI.Label` + `Camera.WorldToScreenPoint`) - the
+  same approach as flir.enemymarkers. `AddComponent<T>()` also only works for types IL2CPP
+  already instantiated, and a failed generic method store stays poisoned for later calls.
 - `BepInEx.Unity.IL2CPP.Configuration.KeyboardShortcut` is the IL2CPP flavour of the
   shortcut config entry; `IsDown()` matches the old `GetKeyDown` behaviour.
 - Events on IL2CPP types accept managed delegates (`Action<IPlayer>`); use

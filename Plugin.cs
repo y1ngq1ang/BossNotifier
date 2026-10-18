@@ -424,6 +424,10 @@ namespace BossNotifier
         // throw while serialising its default value.
         private static void RegisterColorConverter()
         {
+            // Another plugin (flir.enemymarkers) usually registers a Color converter first;
+            // adding a second one only logs a warning, so reuse whatever is already there.
+            if (TomlTypeConverter.CanConvert(typeof(Color))) return;
+
             TomlTypeConverter.AddConverter(typeof(Color), new BepInEx.Configuration.TypeConverter
             {
                 ConvertToString = (obj, type) =>
@@ -872,6 +876,8 @@ namespace BossNotifier
         private Camera _mainCamera;
         private Action<IPlayer> _onPersonAddHandler;
         private float _pendingNotificationDelay = -1f;
+        private bool _showBossesKeyHeld;
+        private bool _toggleMarkersKeyHeld;
         private static GUIStyle _markerStyle;
 
         #region Initialization
@@ -1109,20 +1115,26 @@ namespace BossNotifier
                 }
             }
 
-            // Handle keyboard shortcuts
-            if (BossNotifierPlugin.showBossesKeyCode.Value.IsDown())
+            // Handle keyboard shortcuts. IsPressed() polls the held state and the edge is
+            // detected here, so a press is not lost if a frame is ever skipped - unlike
+            // IsDown(), which has to observe the exact key-down frame.
+            bool showBossesHeld = BossNotifierPlugin.showBossesKeyCode.Value.IsPressed();
+            if (showBossesHeld && !_showBossesKeyHeld)
             {
                 BossNotifierPlugin.LogMessage(LogLevel.Info, "Show-bosses key pressed.");
                 SendBossNotifications();
             }
+            _showBossesKeyHeld = showBossesHeld;
 
             // Handle marker toggle key
-            if (BossNotifierPlugin.toggleMarkersKey.Value.IsDown())
+            bool toggleMarkersHeld = BossNotifierPlugin.toggleMarkersKey.Value.IsPressed();
+            if (toggleMarkersHeld && !_toggleMarkersKeyHeld)
             {
                 _markersVisible = !_markersVisible;
                 string status = _markersVisible ? "ON" : "OFF";
                 ShowNotification($"Boss Markers: {status}", ENotificationDurationType.Default);
             }
+            _toggleMarkersKeyHeld = toggleMarkersHeld;
 
             // Drop markers whose boss is gone; the drawing itself happens in OnGUI.
             if (_bossMarkers != null && _bossMarkers.Count > 0)

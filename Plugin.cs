@@ -1,19 +1,24 @@
-﻿using BepInEx;
-using SPT.Reflection.Patching;
-using SPT.Reflection.Utils;
-using System.Reflection;
-using UnityEngine;
-using EFT.Communications;
-using EFT;
-using System.Collections.Generic;
+using BepInEx;
 using BepInEx.Configuration;
-using Comfort.Common;
 using BepInEx.Logging;
-using System.Text;
-using System;
-using System.IO;
+using BepInEx.Unity.IL2CPP;
+using BepInEx.Unity.IL2CPP.Configuration;
+using Comfort.Common;
+using EFT;
+using EFT.Communications;
 using HarmonyLib;
-using System.Linq;
+using Il2CppInterop.Runtime;
+using Il2CppInterop.Runtime.Injection;
+using SPTushonka.Reflection.Patching;
+using SPTushonka.Reflection.Utils;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
+using UnityEngine;
 
 
 
@@ -21,10 +26,13 @@ using System.Linq;
 
 namespace BossNotifier
 {
-    [BepInPlugin("Mattexe.BossNotifier", "BossNotifier", "1.2.1")]
+    [BepInPlugin(PluginGuid, "BossNotifier", PluginVersion)]
     [BepInDependency("com.fika.core", BepInDependency.DependencyFlags.SoftDependency)]
-    public class BossNotifierPlugin : BaseUnityPlugin
+    public class BossNotifierPlugin : BasePlugin
     {
+        public const string PluginGuid = "Mattexe.BossNotifier";
+        public const string PluginVersion = "2.0.0";
+
         public static PropertyInfo FikaClientTypeProperty;
 
         // Configuration entries - General
@@ -61,10 +69,10 @@ namespace BossNotifier
         public static void InvokeOnBossDied(string bossName) => OnBossDied?.Invoke(bossName);
         public static void InvokeOnRaidEnded() => OnRaidEnded?.Invoke();
 
-        // Logging methods
-        public static void Log(LogLevel level, string msg)
+        // Logging methods. Named LogMessage because BasePlugin already exposes a Log property.
+        public static void LogMessage(LogLevel level, string msg)
         {
-            logger.Log(level, msg);
+            logger?.Log(level, msg);
         }
 
         // Dictionary mapping boss types to names
@@ -87,6 +95,31 @@ namespace BossNotifier
             { WildSpawnType.exUsec, "Rogues" },
             { WildSpawnType.bossKolontay, "Kollontay" },
             { WildSpawnType.bossPartisan, "Partisan" },
+
+            // --- SPT 5.0 / EFT 1.0 additions ---
+            // Cultist variants: same encounter as the priest, so they share the group name.
+            { WildSpawnType.sectantPredvestnik, "Cultists" },
+            { WildSpawnType.sectantPrizrak, "Cultists" },
+            { WildSpawnType.sectantOni, "Cultists" },
+            // Labyrinth. The in-game nicknames are literally "Shadow of Tagilla" and
+            // "Vengeful Killa" (bot types bosstagillaagro / bosskillaagro).
+            { WildSpawnType.bossTagillaAgro, "Shadow of Tagilla" },
+            { WildSpawnType.bossKillaAgro, "Vengeful Killa" },
+            // Icebreaker (bossWedge, 12 spawn points) and the dark Lab (bossWedgeLab).
+            { WildSpawnType.bossWedge, "The Wedge" },
+            { WildSpawnType.bossWedgeLab, "The Wedge" },
+            // Black Division: the Icebreaker squad lead plus its operatives, which the Pier
+            // (terminal) spawns as scripted ambush groups.
+            { WildSpawnType.bossBullyBlackDiv, "Black Division" },
+            { WildSpawnType.blackDivision, "Black Division" },
+            { WildSpawnType.pmcBotBlackDiv, "Black Division" },
+            // Russian military squads on the Pier, plus the Shoreline gate tower sentry.
+            { WildSpawnType.vsRF, "Russian Military" },
+            { WildSpawnType.vsRFSniper, "Russian Military" },
+            { WildSpawnType.sentry, "Russian Military" },
+            // Zryachiy's revenge event is the same boss showing up again.
+            { WildSpawnType.ravangeZryachiyEvent, "Zryachiy" },
+
             { (WildSpawnType)4206927, "Punisher" },
             { (WildSpawnType)199, "Legion" },
         };
@@ -125,6 +158,8 @@ namespace BossNotifier
             "Blood Hounds",
             "Crazy Scavs",
             "Rogues",
+            "Black Division",
+            "Russian Military",
         };
 
         // Goons members (for grouping)
@@ -252,73 +287,126 @@ namespace BossNotifier
             {"ZoneUsecBase", "USEC Base" },
             {"ZoneStoneBunker", "Stone Bunker" },
             {"ZoneDepo", "Depot" },
+
+            // === ICEBREAKER ===
+            {"BotZoneMash_t1", "Machine Room" },
+            {"BotZoneFront", "Bow" },
+            {"BotZoneFront2", "Bow" },
+            {"BotZoneKitchen", "Kitchen" },
+            {"BotZoneKorrDown1", "Lower Corridor" },
+            {"BotZoneRoom_Eng", "Engine Room" },
+            {"BotZoneRoom_Eng2", "Engine Room" },
+            {"BotZoneEngineHide", "Engine Hideout" },
+            {"BotZoneStern", "Stern" },
+            {"BotZoneRoomsThird", "Third Deck Rooms" },
+            {"BotZoneRoomsThirdKitchen", "Third Deck Kitchen" },
+            {"BotZoneRoomsFour", "Fourth Deck Rooms" },
+            {"BotZoneArmory", "Armory" },
+            {"BotZoneGreenOffice", "Green Office" },
+
+            // === EXTRA ZONES ON EXISTING MAPS ===
+            {"ZoneTagilla", "Underground" },
+            {"ZoneSnipeCarShowroom", "Car Showroom Rooftop" },
+            {"ZoneGateTowerRight", "Gate Tower (Right)" },
+            {"ZoneGateTowerLeft", "Gate Tower (Left)" },
+
+            // === TERMINAL (PIER) ===
+            {"Zone1BD1PortAmbush1", "Port Ambush" },
+            {"Zone1BD1HangarAmbush11", "Hangar Ambush" },
+            {"Zone1BD1HangarBD11", "Hangar" },
+            {"Zone1BDGateAmbush13", "Gate Ambush" },
+            {"Zone2BDWarehouse18", "Warehouse" },
+            {"Zone2BDWarehouse19", "Warehouse" },
+            {"Zone2BDColumns23", "Columns" },
+            {"Zone2BDPort28", "Port" },
+            {"Zone2BDPort30", "Port" },
+            {"Zone2BDPort31", "Port" },
+            {"Zone2BDPort32", "Port" },
+            {"Zone2ScavPort29", "Scav Port" },
+            {"Zone1VSRF1Spawn3", "VS RF Spawn" },
+            {"Zone1VSRFSnipeRoofPort2", "Port Rooftop" },
+            {"Zone1VSRFStoreAmbush10", "Store Ambush" },
+            {"Zone2VSRFPassMiddle15", "Middle Pass" },
+            {"Zone2VSRFColumns22", "Columns" },
+            {"Zone2VSRFContainers24", "Containers" },
+            {"Zone2VSRFExit33", "Exit" },
         };
 
-        private void Awake()
+        public override void Load()
         {
-            logger = Logger;
+            logger = Log;
+
+            // ConfigEntry<Color> only works once the TOML converter exists; BepInEx ships
+            // converters for primitives and enums only, so register it before any Bind<Color>.
+            RegisterColorConverter();
 
             // Namespace moved from Fika.Core.Coop.Utils -> Fika.Core.Main.Utils, and the host/client
             // indicator became the "ClientType" property (EClientType.Host == 2) instead of a
-            // "MatchingType" field.
-            Type FikaUtilExternalType = Type.GetType("Fika.Core.Main.Utils.FikaBackendUtils, Fika.Core", false);
-            if (FikaUtilExternalType != null)
+            // "MatchingType" field. Fika is optional, so everything here is null-tolerant.
+            Type fikaUtilExternalType = Type.GetType("Fika.Core.Main.Utils.FikaBackendUtils, Fika.Core", false);
+            if (fikaUtilExternalType != null)
             {
-                FikaClientTypeProperty = AccessTools.Property(FikaUtilExternalType, "ClientType");
+                FikaClientTypeProperty = AccessTools.Property(fikaUtilExternalType, "ClientType");
             }
 
             // Initialize configuration entries - General
-            showBossesKeyCode = Config.Bind("1. General", "Keyboard Shortcut", new KeyboardShortcut(KeyCode.O), "Key to show boss notifications.");
-            showNotificationsOnRaidStart = Config.Bind("1. General", "Show Bosses on Raid Start", true, "Show boss notifications on raid start.");
+            showBossesKeyCode = Config.Bind("1. 通用", "快捷键", new KeyboardShortcut(KeyCode.O), "按下后显示 Boss 通知。");
+            showNotificationsOnRaidStart = Config.Bind("1. 通用", "开局显示 Boss", true, "进入战局时自动显示 Boss 通知。");
 
             // Initialize configuration entries - Intel Center
-            intelCenterUnlockLevel = Config.Bind("2. Intel Center Unlocks (4 means Disabled)", "1. Intel Center Level Requirement", 0,
-                new ConfigDescription("Level to unlock plain notifications at.",
+            intelCenterUnlockLevel = Config.Bind("2. 情报中心解锁（4 表示禁用）", "1. 情报中心等级要求", 0,
+                new ConfigDescription("达到该情报中心等级后，解锁基础通知。",
                 new AcceptableValueRange<int>(0, 4)));
 
-            intelCenterLocationUnlockLevel = Config.Bind("2. Intel Center Unlocks (4 means Disabled)", "2. Intel Center Location Level Requirement", 0,
-                new ConfigDescription("Unlocks showing boss spawn location in notification.",
+            intelCenterLocationUnlockLevel = Config.Bind("2. 情报中心解锁（4 表示禁用）", "2. 情报中心位置等级要求", 0,
+                new ConfigDescription("达到该等级后，通知中显示 Boss 所在区域。",
                 new AcceptableValueRange<int>(0, 4)));
 
-            intelCenterDetectedUnlockLevel = Config.Bind("2. Intel Center Unlocks (4 means Disabled)", "3. Intel Center Detection Requirement", 0,
-                new ConfigDescription("Unlocks showing boss detected notification. (When you get near a boss)",
+            intelCenterDetectedUnlockLevel = Config.Bind("2. 情报中心解锁（4 表示禁用）", "3. 情报中心侦测等级要求", 0,
+                new ConfigDescription("达到该等级后，靠近 Boss 时显示侦测通知。",
                 new AcceptableValueRange<int>(0, 4)));
 
             // Initialize configuration entries - Markers
-            enableMarkers = Config.Bind("3. Boss Markers", "1. Enable Markers", true, "Show 3D markers above boss heads.");
+            enableMarkers = Config.Bind("3. Boss 标记", "1. 启用标记", true, "在 Boss 头顶显示 3D 标记。");
 
-            toggleMarkersKey = Config.Bind("3. Boss Markers", "2. Toggle Markers Key", new KeyboardShortcut(KeyCode.P), "Key to toggle marker visibility.");
+            toggleMarkersKey = Config.Bind("3. Boss 标记", "2. 标记开关快捷键", new KeyboardShortcut(KeyCode.P), "按下后切换标记显示。");
 
-            showThroughWalls = Config.Bind("3. Boss Markers", "3. Show Through Walls", true, "If enabled, markers are visible through walls. If disabled, markers only show when you have line of sight to the boss.");
+            showThroughWalls = Config.Bind("3. Boss 标记", "3. 穿墙显示", true, "开启后标记可穿墙看到；关闭后只在视线内显示。");
 
-            markerCharacter = Config.Bind("3. Boss Markers", "4. Marker Character", "▼",
-                new ConfigDescription("Character to display as marker.",
+            markerCharacter = Config.Bind("3. Boss 标记", "4. 标记符号", "▼",
+                new ConfigDescription("标记使用的符号。",
                 new AcceptableValueList<string>("▼", "▽", "↓", "●", "◆", "★", "☠", "◉", "▲")));
 
-            showBossName = Config.Bind("3. Boss Markers", "5. Show Boss Name", true, "Show boss name on marker.");
+            showBossName = Config.Bind("3. Boss 标记", "5. 显示 Boss 名称", true, "在标记上显示 Boss 名称。");
 
-            showDistance = Config.Bind("3. Boss Markers", "6. Show Distance", true, "Show distance to boss on marker.");
+            showDistance = Config.Bind("3. Boss 标记", "6. 显示距离", true, "在标记上显示与 Boss 的距离。");
 
-            fontSize = Config.Bind("3. Boss Markers", "7. Marker Size", 64,
-                new ConfigDescription("Font size of the marker.",
+            fontSize = Config.Bind("3. Boss 标记", "7. 字体大小", 64,
+                new ConfigDescription("标记的字体大小。",
                 new AcceptableValueRange<int>(32, 128)));
 
-            markerBaseScale = Config.Bind("3. Boss Markers", "8. Base Scale", 0.04f,
-                new ConfigDescription("Base scale of markers.",
+            markerBaseScale = Config.Bind("3. Boss 标记", "8. 基础缩放", 0.04f,
+                new ConfigDescription("标记的基础缩放比例。",
                 new AcceptableValueRange<float>(0.01f, 0.2f)));
 
-            markerMaxScale = Config.Bind("3. Boss Markers", "9. Max Scale", 0.3f,
-                new ConfigDescription("Maximum scale at far distances.",
+            markerMaxScale = Config.Bind("3. Boss 标记", "9. 最大缩放", 0.3f,
+                new ConfigDescription("远距离时的最大缩放比例。",
                 new AcceptableValueRange<float>(0.1f, 1f)));
 
-            visibilityDistance = Config.Bind("3. Boss Markers", "10. Visibility Distance", 200,
-                new ConfigDescription("Maximum distance (meters) to show markers.",
+            visibilityDistance = Config.Bind("3. Boss 标记", "10. 可见距离", 200,
+                new ConfigDescription("标记可见的最大距离（米）。",
                 new AcceptableValueRange<int>(50, 500)));
 
-            markerColor = Config.Bind("3. Boss Markers", "11. Marker Color", new Color(1f, 0f, 0f, 1f), "Color of boss markers (red by default).");
+            markerColor = Config.Bind("3. Boss 标记", "11. 标记颜色", new Color(1f, 0f, 0f, 1f), "Boss 标记的颜色（默认红色）。");
 
 
             LoadCustomBossConfig();
+
+            // IL2CPP plugins cannot define MonoBehaviours out of the box: the game's il2cpp
+            // runtime has to be told about them before AddComponent can use them.
+            ClassInjector.RegisterTypeInIl2Cpp<Billboard>();
+            ClassInjector.RegisterTypeInIl2Cpp<BossNotifierMono>();
+
             // Enable patches
             new BossLocationSpawnPatch().Enable();
             new NewGamePatch().Enable();
@@ -327,19 +415,44 @@ namespace BossNotifier
             // Subscribe to config changes
             Config.SettingChanged += Config_SettingChanged;
 
-            Logger.LogInfo($"Plugin BossNotifier v1.2.1 is loaded!");
+            logger.LogInfo($"Plugin BossNotifier v{PluginVersion} is loaded!");
 
             // Invoke event for addon to hook into
             OnPluginAwake?.Invoke();
         }
 
+        // The default TOML converters cover primitives and enums only, so a Color entry would
+        // throw while serialising its default value.
+        private static void RegisterColorConverter()
+        {
+            TomlTypeConverter.AddConverter(typeof(Color), new BepInEx.Configuration.TypeConverter
+            {
+                ConvertToString = (obj, type) =>
+                {
+                    Color color = (Color)obj;
+                    return string.Format(CultureInfo.InvariantCulture, "{0:R} {1:R} {2:R} {3:R}", color.r, color.g, color.b, color.a);
+                },
+                ConvertToObject = (str, type) =>
+                {
+                    string[] parts = str.Split(new[] { ' ', ',', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length < 3) return new Color(1f, 1f, 1f, 1f);
+
+                    float channel(int index)
+                    {
+                        float value;
+                        return float.TryParse(parts[index], NumberStyles.Float, CultureInfo.InvariantCulture, out value) ? value : 0f;
+                    }
+
+                    return new Color(channel(0), channel(1), channel(2), parts.Length > 3 ? channel(3) : 1f);
+                }
+            });
+        }
+
         // Event handler for configuration changes
         private void Config_SettingChanged(object sender, SettingChangedEventArgs e)
         {
-            ConfigEntryBase changedSetting = e.ChangedSetting;
-
             // If player is in a raid, reset their notifications to reflect changes
-            if (BossNotifierMono.Instance) BossNotifierMono.Instance.GenerateBossNotifications();
+            if (BossNotifierMono.Instance != null) BossNotifierMono.Instance.GenerateBossNotifications();
         }
 
         // Get boss name by type (for notifications - returns group name for custom bosses)
@@ -397,9 +510,24 @@ namespace BossNotifier
             return customBossLookup.ContainsKey(typeId);
         }
 
-        // Get zone name by ID
+        // Look a zone up in the table without falling back to name derivation. Bot zones report
+        // their own label, which may already be readable ("Scav Base") or a raw id
+        // ("ZoneDormitory"); only the raw form needs translating, and running an already
+        // readable label through GetZoneName would insert stray spaces.
+        public static string GetMappedZoneName(string zoneId)
+        {
+            if (string.IsNullOrEmpty(zoneId)) return null;
+
+            string mapped;
+            return zoneNames.TryGetValue(zoneId, out mapped) ? mapped : zoneId;
+        }
+
+        // Get zone name by ID. Returns an empty string when the zone carries no useful label
+        // (Factory's plain "BotZone"), and a derived name for zones with no entry yet.
         public static string GetZoneName(string zoneId)
         {
+            if (string.IsNullOrEmpty(zoneId)) return "";
+
             if (zoneNames.ContainsKey(zoneId)) return zoneNames[zoneId];
 
             string location = zoneId.Replace("Bot", "").Replace("Zone", "");
@@ -421,7 +549,13 @@ namespace BossNotifier
         private bool IsPluginLoaded(string pluginGUID)
         {
             if (string.IsNullOrEmpty(pluginGUID)) return true; // No GUID = always load
-            return BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey(pluginGUID);
+
+            // BepInEx 6 has no BepInEx.Bootstrap.Chainloader type; the IL2CPP chainloader keeps
+            // the same plugin registry.
+            IL2CPPChainloader chainloader = IL2CPPChainloader.Instance;
+            if (chainloader == null) return false;
+
+            return chainloader.Plugins.ContainsKey(pluginGUID);
         }
 
         // Default colors for custom groups
@@ -442,7 +576,11 @@ namespace BossNotifier
                 if (File.Exists(configPath))
                 {
                     string json = File.ReadAllText(configPath);
-                    customBossConfig = Newtonsoft.Json.JsonConvert.DeserializeObject<CustomBossConfig>(json);
+
+                    // Newtonsoft.Json only ships as an IL2CPP proxy here, which cannot
+                    // deserialise into a plain managed POCO, so use System.Text.Json.
+                    customBossConfig = JsonSerializer.Deserialize<CustomBossConfig>(json,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
                     if (customBossConfig?.customBossGroups != null)
                     {
@@ -454,11 +592,11 @@ namespace BossNotifier
                             // Check if the mod is installed
                             if (!IsPluginLoaded(group.pluginGUID))
                             {
-                                Logger.LogInfo($"Skipping {group.groupName} - mod not installed (GUID: {group.pluginGUID})");
+                                logger.LogInfo($"Skipping {group.groupName} - mod not installed (GUID: {group.pluginGUID})");
                                 continue;
                             }
 
-                            Logger.LogInfo($"Mod detected: {group.groupName} (GUID: {group.pluginGUID})");
+                            logger.LogInfo($"Mod detected: {group.groupName} (GUID: {group.pluginGUID})");
                             loadedCustomMods.Add(group.groupName);
 
                             // Add to lookup dictionaries
@@ -478,7 +616,7 @@ namespace BossNotifier
                             }
 
                             // Create config entries for this group
-                            string sectionName = $"{sectionIndex}. {group.groupName} Markers";
+                            string sectionName = $"{sectionIndex}. {group.groupName} 标记";
 
                             // Get default color for this group
                             Color defaultColor = defaultGroupColors.ContainsKey(group.groupName)
@@ -487,32 +625,32 @@ namespace BossNotifier
 
                             customGroupMarkerCharacters[group.groupName] = Config.Bind(
                                 sectionName,
-                                "Marker Character",
+                                "标记符号",
                                 "▼",
-                                new ConfigDescription($"Character to display as marker for {group.groupName}.",
+                                new ConfigDescription($"{group.groupName} 使用的标记符号。",
                                 new AcceptableValueList<string>("▼", "▽", "↓", "●", "◆", "★", "☠", "◉", "▲")));
 
                             customGroupMarkerColors[group.groupName] = Config.Bind(
                                 sectionName,
-                                "Marker Color",
+                                "标记颜色",
                                 defaultColor,
-                                $"Color of {group.groupName} markers.");
+                                $"{group.groupName} 标记的颜色。");
 
                             loadedGroups++;
                             sectionIndex++;
                         }
 
-                        Logger.LogInfo($"Loaded {loadedGroups} custom boss groups with {customBossLookup.Count} total IDs");
+                        logger.LogInfo($"Loaded {loadedGroups} custom boss groups with {customBossLookup.Count} total IDs");
                     }
                 }
                 else
                 {
-                    Logger.LogWarning($"Custom boss config not found at: {configPath}");
+                    logger.LogWarning($"Custom boss config not found at: {configPath}");
                 }
             }
             catch (Exception ex)
             {
-                Logger.LogError($"Failed to load custom boss config: {ex.Message}");
+                logger.LogError($"Failed to load custom boss config: {ex.Message}");
             }
         }
     }
@@ -529,7 +667,7 @@ namespace BossNotifier
         {
             if (location == null)
             {
-                Logger.LogError("Tried to add boss with null location.");
+                BossNotifierPlugin.LogMessage(LogLevel.Error, "Tried to add boss with null location.");
                 return;
             }
             if (bossesInRaid.ContainsKey(boss))
@@ -555,47 +693,94 @@ namespace BossNotifier
         [PatchPostfix]
         private static void PatchPostfix(BossLocationSpawn __instance)
         {
-            if (__instance.ShallSpawn)
+            if (!__instance.ShallSpawn) return;
+
+            // Custom mods (RUAF / UNTAR / Black Division) inject BossLocationSpawn entries
+            // with delays, random timing, BossChance < 100, or trigger conditions. ShallSpawn
+            // is true at raid start but the bots may spawn minutes later, only on a trigger,
+            // or never. Skip them here and let OnPersonAdd / BotBossPatch register them once
+            // they actually spawn into the world.
+            if (BossNotifierPlugin.customBossLookup.ContainsKey((int)__instance.BossType)) return;
+
+            string name = BossNotifierPlugin.GetBossName(__instance.BossType);
+            if (name == null) return;
+
+            string location = GetSpawnLocations(__instance);
+            BossNotifierPlugin.LogMessage(LogLevel.Info, $"Boss {name} @ zone {GetRawZone(__instance)} translated to {location}");
+
+            TryAddBoss(name, location);
+        }
+
+        // SPT 5.0 moved this field on the wire: the spawn entries now ship "BossZone", and one
+        // entry can list several comma separated zones where the boss may appear. Keep reading
+        // "BornZone" as a fallback so pre-5.0 location data still works.
+        private static string GetRawZone(BossLocationSpawn spawn)
+        {
+            string zone = spawn.BossZone;
+            if (string.IsNullOrEmpty(zone)) zone = spawn.BornZone;
+            return zone;
+        }
+
+        private static string GetSpawnLocations(BossLocationSpawn spawn)
+        {
+            string raw = GetRawZone(spawn);
+            if (string.IsNullOrEmpty(raw)) return "";
+
+            List<string> locations = new List<string>();
+            foreach (string part in raw.Split(','))
             {
-                // Custom mods (RUAF / UNTAR / Black Division) inject BossLocationSpawn entries
-                // with delays, random timing, BossChance < 100, or trigger conditions. ShallSpawn
-                // is true at raid start but the bots may spawn minutes later, only on a trigger,
-                // or never. Skip them here and let OnPersonAdd / BotBossPatch register them once
-                // they actually spawn into the world.
-                if (BossNotifierPlugin.customBossLookup.ContainsKey((int)__instance.BossType)) return;
+                string zone = part.Trim();
+                if (zone.Length == 0) continue;
 
-                string name = BossNotifierPlugin.GetBossName(__instance.BossType);
-                if (name == null) return;
-
-                string location = BossNotifierPlugin.GetZoneName(__instance.BornZone);
-
-                BossNotifierPlugin.Log(LogLevel.Info, $"Boss {name} @ zone {__instance.BornZone} translated to {(location == null ? __instance.BornZone.Replace("Bot", "").Replace("Zone", "") : location)}");
-
-                if (location == null)
-                {
-                    TryAddBoss(name, __instance.BornZone.Replace("Bot", "").Replace("Zone", ""));
-                }
-                else if (location.Equals(""))
-                {
-                    TryAddBoss(name, "");
-                }
-                else
-                {
-                    TryAddBoss(name, location);
-                }
+                string translated = BossNotifierPlugin.GetZoneName(zone);
+                if (!locations.Contains(translated)) locations.Add(translated);
             }
+
+            return string.Join(", ", locations);
         }
     }
 
     // Patch for tracking live boss spawns
     public class BotBossPatch : ModulePatch
     {
-        protected override MethodBase GetTargetMethod() => typeof(BotBoss).GetConstructors()[0];
+        // IL2CPP also emits a pointer constructor, so picking [0] is no longer deterministic.
+        protected override MethodBase GetTargetMethod() =>
+            AccessTools.Constructor(typeof(BotBoss), new[] { typeof(BotOwner) });
 
         public static HashSet<string> spawnedBosses = new HashSet<string>();
         public static HashSet<string> deadBosses = new HashSet<string>();
         public static HashSet<string> vicinityNotificationsSent = new HashSet<string>(); // FIX: Track sent notifications
         public static Queue<string> vicinityNotifications = new Queue<string>();
+
+        // Boss name -> the live bot, so the notification can report the zone the boss actually
+        // spawned in. SpawnBotZone may not be assigned yet when the BotBoss constructor runs,
+        // so the lookup is deferred until notifications are generated.
+        public static Dictionary<string, BotOwner> bossOwners = new Dictionary<string, BotOwner>();
+
+        // The zone a bot really spawned in, as opposed to every zone its BossLocationSpawn
+        // entry lists as a candidate.
+        public static string ResolveSpawnZone(BotOwner owner)
+        {
+            try
+            {
+                if (owner == null) return null;
+
+                BotZone zone = owner.SpawnBotZone;
+                if (zone == null) return null;
+
+                string nameZone = zone.NameZone;
+                string shortName = zone.ShortName;
+
+                if (!string.IsNullOrEmpty(nameZone)) return BossNotifierPlugin.GetMappedZoneName(nameZone);
+                if (!string.IsNullOrEmpty(shortName)) return BossNotifierPlugin.GetMappedZoneName(shortName);
+            }
+            catch (Exception ex)
+            {
+                BossNotifierPlugin.LogMessage(LogLevel.Warning, $"Could not read the spawn zone: {ex.Message}");
+            }
+
+            return null;
+        }
 
         [PatchPostfix]
         private static void PatchPostfix(BotBoss __instance)
@@ -606,9 +791,15 @@ namespace BossNotifier
 
             Vector3 positionVector = __instance.Player().Position;
             string position = $"{(int)positionVector.x}, {(int)positionVector.y}, {(int)positionVector.z}";
-            BossNotifierPlugin.Log(LogLevel.Info, $"{name} has spawned at {position} on {Singleton<GameWorld>.Instance.LocationId}");
+            BossNotifierPlugin.LogMessage(LogLevel.Info, $"{name} has spawned at {position} on {Singleton<GameWorld>.Instance.LocationId}");
 
             spawnedBosses.Add(name);
+            bossOwners[name] = __instance.Owner;
+
+            // Diagnostic: SpawnBotZone may still be unassigned this early, in which case the
+            // notification resolves it later from the stored bot.
+            string zoneAtSpawn = ResolveSpawnZone(__instance.Owner);
+            BossNotifierPlugin.LogMessage(LogLevel.Info, $"{name} spawn zone at spawn time: {zoneAtSpawn ?? "(not assigned yet)"}");
 
             // Fallback: register the boss in bossesInRaid if BossLocationSpawn.Init didn't.
             // Hits two cases: custom mod bosses spawned dynamically (RUAF/UNTAR/Black Division),
@@ -616,7 +807,7 @@ namespace BossNotifier
             if (!BossLocationSpawnPatch.bossesInRaid.ContainsKey(name))
             {
                 BossLocationSpawnPatch.bossesInRaid[name] = "";
-                BossNotifierPlugin.Log(LogLevel.Info, $"Registered {name} in bossesInRaid via spawn fallback");
+                BossNotifierPlugin.LogMessage(LogLevel.Info, $"Registered {name} in bossesInRaid via spawn fallback");
                 if (BossNotifierMono.Instance != null) BossNotifierMono.Instance.GenerateBossNotifications();
             }
 
@@ -650,6 +841,9 @@ namespace BossNotifier
     // Billboard component - makes object always face the camera
     public class Billboard : MonoBehaviour
     {
+        // Injected IL2CPP classes need this constructor; the game never calls it directly.
+        public Billboard(IntPtr ptr) : base(ptr) { }
+
         private Camera _mainCamera;
 
         private void Start()
@@ -693,48 +887,73 @@ namespace BossNotifier
     #region BossNotifierMono
     public class BossNotifierMono : MonoBehaviour
     {
+        // Injected IL2CPP classes need this constructor; the game never calls it directly.
+        public BossNotifierMono(IntPtr ptr) : base(ptr) { }
+
         public static BossNotifierMono Instance;
         private List<string> bossNotificationMessages;
         public int intelCenterLevel;
 
         // Marker system
         private GameWorld _gameWorld;
-        private Dictionary<Player, BossMarkerInfo> _bossMarkers = new Dictionary<Player, BossMarkerInfo>();
+        private Dictionary<Player, BossMarkerInfo> _bossMarkers;
         private bool _markersVisible = true;
         private Camera _mainCamera;
+        private Action<IPlayer> _onPersonAddHandler;
+        private float _pendingNotificationDelay = -1f;
+        private static Font _markerFont;
+
+        private static Font MarkerFont
+        {
+            get
+            {
+                if (_markerFont == null)
+                {
+                    // Unity 2022 dropped Arial.ttf ("LegacyRuntime.ttf" is the built-in replacement).
+                    _markerFont = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+                    if (_markerFont == null) _markerFont = Font.CreateDynamicFontFromOSFont("Arial", 64);
+                }
+                return _markerFont;
+            }
+        }
 
         #region Initialization
         public static void Init()
         {
-            if (Singleton<GameWorld>.Instantiated)
+            GameWorld gameWorld = Singleton<GameWorld>.Instance;
+            if (gameWorld == null) return;
+
+            BossNotifierPlugin.LogMessage(LogLevel.Info, $"Game started on map {gameWorld.LocationId}");
+
+            Instance = gameWorld.GetOrAddComponent<BossNotifierMono>();
+
+            // Get Intel Center level
+            try
             {
-                Instance = Singleton<GameWorld>.Instance.GetOrAddComponent<BossNotifierMono>();
-                BossNotifierPlugin.Log(LogLevel.Info, $"Game started on map {Singleton<GameWorld>.Instance.LocationId}");
+                var session = ClientAppUtils.GetMainApp().GetClientBackEndSession();
+                var areas = session.Profile.Hideout.Areas;
 
-                // Get Intel Center level - SPT 4.0.x compatible
-                try
+                Instance.intelCenterLevel = 0;
+                if (areas != null)
                 {
-                    var session = ClientAppUtils.GetMainApp().GetClientBackEndSession();
-                    var areas = session.Profile.Hideout.Areas;
-
-                    if (areas != null)
+                    for (int i = 0; i < areas.Length; i++)
                     {
-                        var intelCenter = areas.FirstOrDefault(a => a.AreaType == EAreaType.IntelligenceCenter);
-                        Instance.intelCenterLevel = intelCenter?.Level ?? 0;
-                    }
-                    else
-                    {
-                        Instance.intelCenterLevel = 0;
+                        var area = areas[i];
+                        if (area != null && area.AreaType == EAreaType.IntelligenceCenter)
+                        {
+                            Instance.intelCenterLevel = area.Level;
+                            break;
+                        }
                     }
                 }
-                catch (Exception ex)
-                {
-                    BossNotifierPlugin.Log(LogLevel.Warning, $"Could not get Intel Center level: {ex.Message}");
-                    Instance.intelCenterLevel = 0;
-                }
-
-                BossNotifierPlugin.Log(LogLevel.Info, $"Intel Center level: {Instance.intelCenterLevel}");
             }
+            catch (Exception ex)
+            {
+                BossNotifierPlugin.LogMessage(LogLevel.Warning, $"Could not get Intel Center level: {ex.Message}");
+                Instance.intelCenterLevel = 0;
+            }
+
+            BossNotifierPlugin.LogMessage(LogLevel.Info, $"Intel Center level: {Instance.intelCenterLevel}");
         }
 
         public void Start()
@@ -742,12 +961,16 @@ namespace BossNotifier
             _gameWorld = Singleton<GameWorld>.Instance;
             _mainCamera = Camera.main;
             _markersVisible = BossNotifierPlugin.enableMarkers.Value;
+            _bossMarkers = new Dictionary<Player, BossMarkerInfo>();
+            bossNotificationMessages = new List<string>();
 
-            // Register for player spawn events
+            // Register for player spawn events - the interop event takes a managed delegate,
+            // which is kept around so OnDestroy can unsubscribe.
             if (_gameWorld != null)
             {
-                _gameWorld.OnPersonAdd += OnPersonAdd;
-                BossNotifierPlugin.Log(LogLevel.Info, "Registered OnPersonAdd event");
+                _onPersonAddHandler = new Action<IPlayer>(OnPersonAdd);
+                _gameWorld.OnPersonAdd += _onPersonAddHandler;
+                BossNotifierPlugin.LogMessage(LogLevel.Info, "Registered OnPersonAdd event");
             }
 
             // Initialize markers for already spawned players (bosses)
@@ -759,7 +982,10 @@ namespace BossNotifier
             BossNotifierPlugin.InvokeOnRaidStarted();
 
             if (!BossNotifierPlugin.showNotificationsOnRaidStart.Value) return;
-            Invoke("SendBossNotifications", 2f);
+
+            // Delayed first notification: a timer in Update instead of MonoBehaviour.Invoke,
+            // which would have to resolve a managed method by name on an injected class.
+            _pendingNotificationDelay = 2f;
         }
 
         private void InitializeExistingBossMarkers()
@@ -770,11 +996,14 @@ namespace BossNotifier
             {
                 if (player == null || player.IsYourPlayer) continue;
 
-                var role = player.Profile?.Info?.Settings?.Role;
-                if (role.HasValue && BossNotifierPlugin.IsBoss(role.Value))
+                var settings = player.Profile?.Info?.Settings;
+                if (settings == null) continue;
+
+                WildSpawnType role = settings.Role;
+                if (BossNotifierPlugin.IsBoss(role))
                 {
-                    string groupName = BossNotifierPlugin.GetBossName(role.Value);          // Group name for notifications
-                    string displayName = BossNotifierPlugin.GetBossDisplayName(role.Value); // Display name for markers
+                    string groupName = BossNotifierPlugin.GetBossName(role);          // Group name for notifications
+                    string displayName = BossNotifierPlugin.GetBossDisplayName(role); // Display name for markers
                     if (groupName != null && !_bossMarkers.ContainsKey(player))
                     {
                         CreateBossMarker(player, displayName ?? groupName, groupName);
@@ -782,7 +1011,7 @@ namespace BossNotifier
                         // FIX: Subscribe to death event for existing bosses
                         player.OnPlayerDeadOrUnspawn += OnBossDeadOrUnspawn;
 
-                        RegisterCustomBossInRaid(role.Value, groupName);
+                        RegisterCustomBossInRaid(role, groupName);
                     }
                 }
             }
@@ -797,7 +1026,7 @@ namespace BossNotifier
             if (BossLocationSpawnPatch.bossesInRaid.ContainsKey(groupName)) return;
 
             BossLocationSpawnPatch.bossesInRaid[groupName] = "";
-            BossNotifierPlugin.Log(LogLevel.Info, $"Registered custom boss {groupName} in bossesInRaid via OnPersonAdd");
+            BossNotifierPlugin.LogMessage(LogLevel.Info, $"Registered custom boss {groupName} in bossesInRaid via OnPersonAdd");
             GenerateBossNotifications();
         }
         #endregion
@@ -805,26 +1034,30 @@ namespace BossNotifier
         #region Marker Creation
         private void OnPersonAdd(IPlayer iPlayer)
         {
-            Player player = iPlayer as Player;
+            // Interop hands out a distinct wrapper for the IPlayer view of the same native
+            // object, so "as Player" would return null - TryCast unwraps the native pointer.
+            Player player = iPlayer?.TryCast<Player>();
             if (player == null || player.IsYourPlayer) return;
 
-            var role = player.Profile?.Info?.Settings?.Role;
-            if (!role.HasValue) return;
+            var settings = player.Profile?.Info?.Settings;
+            if (settings == null) return;
+
+            WildSpawnType role = settings.Role;
 
             // Check if this is a boss
-            if (BossNotifierPlugin.IsBoss(role.Value))
+            if (BossNotifierPlugin.IsBoss(role))
             {
-                string groupName = BossNotifierPlugin.GetBossName(role.Value);          // Group name for notifications
-                string displayName = BossNotifierPlugin.GetBossDisplayName(role.Value); // Display name for markers
+                string groupName = BossNotifierPlugin.GetBossName(role);          // Group name for notifications
+                string displayName = BossNotifierPlugin.GetBossDisplayName(role); // Display name for markers
                 if (groupName != null)
                 {
-                    BossNotifierPlugin.Log(LogLevel.Info, $"Boss detected via OnPersonAdd: {displayName ?? groupName} ({groupName})");
+                    BossNotifierPlugin.LogMessage(LogLevel.Info, $"Boss detected via OnPersonAdd: {displayName ?? groupName} ({groupName})");
                     CreateBossMarker(player, displayName ?? groupName, groupName);
 
                     // Subscribe to death event
                     player.OnPlayerDeadOrUnspawn += OnBossDeadOrUnspawn;
 
-                    RegisterCustomBossInRaid(role.Value, groupName);
+                    RegisterCustomBossInRaid(role, groupName);
                 }
             }
         }
@@ -847,7 +1080,12 @@ namespace BossNotifier
                 symbolObj.transform.SetParent(markerObj.transform);
                 symbolObj.transform.localPosition = Vector3.zero;
 
-                TextMesh symbolMesh = symbolObj.AddComponent<TextMesh>();
+                // IL2CPP only ships native metadata for generic methods the game itself used.
+                // "AddComponent<TextMesh>()" has no such instantiation (its MethodInfoStore
+                // throws on first touch, and a failed generic store stays poisoned for every
+                // later call), so go through the non-generic overload with an Il2Cpp type.
+                TextMesh symbolMesh = symbolObj.AddComponent(Il2CppType.Of<TextMesh>()).TryCast<TextMesh>();
+                symbolMesh.font = MarkerFont;
                 symbolMesh.text = markerChar;
                 symbolMesh.fontSize = BossNotifierPlugin.fontSize.Value;
                 symbolMesh.anchor = TextAnchor.MiddleCenter;
@@ -860,7 +1098,8 @@ namespace BossNotifier
                 infoObj.transform.SetParent(markerObj.transform);
                 infoObj.transform.localPosition = new Vector3(0, 0.05f, 0);
 
-                TextMesh infoMesh = infoObj.AddComponent<TextMesh>();
+                TextMesh infoMesh = infoObj.AddComponent(Il2CppType.Of<TextMesh>()).TryCast<TextMesh>();
+                infoMesh.font = MarkerFont;
                 infoMesh.text = bossName;
                 infoMesh.fontSize = 48;
                 infoMesh.anchor = TextAnchor.LowerCenter;
@@ -892,11 +1131,11 @@ namespace BossNotifier
                     BossNotifierPlugin.groupSeenCount[groupName] = seen + 1;
                 }
 
-                BossNotifierPlugin.Log(LogLevel.Info, $"Created marker for boss: {bossName} (group: {groupName})");
+                BossNotifierPlugin.LogMessage(LogLevel.Info, $"Created marker for boss: {bossName} (group: {groupName})");
             }
             catch (Exception ex)
             {
-                BossNotifierPlugin.Log(LogLevel.Error, $"Failed to create marker for {bossName}: {ex.Message}");
+                BossNotifierPlugin.LogMessage(LogLevel.Error, $"Failed to create marker for {bossName}: {ex.Message}");
             }
         }
 
@@ -908,7 +1147,7 @@ namespace BossNotifier
 
             if (_bossMarkers.TryGetValue(player, out var markerInfo))
             {
-                BossNotifierPlugin.Log(LogLevel.Info, $"Boss died/unspawned: {markerInfo.BossName} (group: {markerInfo.GroupName})");
+                BossNotifierPlugin.LogMessage(LogLevel.Info, $"Boss died/unspawned: {markerInfo.BossName} (group: {markerInfo.GroupName})");
 
                 // For plural and custom groups (Cultists, Blood Hounds, RUAF, ...) we count individual deaths
                 // and let IsGroupFullyEliminated decide. For single-instance bosses and Goons individuals
@@ -951,24 +1190,37 @@ namespace BossNotifier
                 string notif = BotBossPatch.vicinityNotifications.Dequeue();
                 if (Instance.intelCenterLevel >= BossNotifierPlugin.intelCenterDetectedUnlockLevel.Value)
                 {
-                    NotificationManager.DisplayMessageNotification(notif, ENotificationDurationType.Long);
+                    BossNotifierPlugin.LogMessage(LogLevel.Info, $"Vicinity notification: {notif}");
+                    ShowNotification(notif, ENotificationDurationType.Long);
                     Instance.GenerateBossNotifications();
                 }
             }
 
-            // Handle keyboard shortcuts
-            if (IsKeyPressed(BossNotifierPlugin.showBossesKeyCode.Value))
+            // Handle the delayed raid-start notification
+            if (_pendingNotificationDelay > 0f)
             {
+                _pendingNotificationDelay -= Time.deltaTime;
+                if (_pendingNotificationDelay <= 0f)
+                {
+                    _pendingNotificationDelay = -1f;
+                    SendBossNotifications();
+                }
+            }
+
+            // Handle keyboard shortcuts
+            if (BossNotifierPlugin.showBossesKeyCode.Value.IsDown())
+            {
+                BossNotifierPlugin.LogMessage(LogLevel.Info, "Show-bosses key pressed.");
                 SendBossNotifications();
             }
 
             // Handle marker toggle key
-            if (IsKeyPressed(BossNotifierPlugin.toggleMarkersKey.Value))
+            if (BossNotifierPlugin.toggleMarkersKey.Value.IsDown())
             {
                 _markersVisible = !_markersVisible;
                 ToggleAllMarkers(_markersVisible);
                 string status = _markersVisible ? "ON" : "OFF";
-                NotificationManager.DisplayMessageNotification($"Boss Markers: {status}", ENotificationDurationType.Default);
+                ShowNotification($"Boss Markers: {status}", ENotificationDurationType.Default);
             }
 
             // Update markers
@@ -976,6 +1228,19 @@ namespace BossNotifier
             {
                 UpdateAllMarkers();
             }
+        }
+
+        // 5.0 dropped the two argument overload, and the surviving one wants an icon type and
+        // an explicit "no colour" nullable. rawText must stay true: with false the game runs
+        // the string through its localisation/formatting step, which blanks out a mod's own text.
+        private static void ShowNotification(string message, ENotificationDurationType duration)
+        {
+            NotificationManager.DisplayMessageNotification(
+                message,
+                duration,
+                ENotificationIconType.Default,
+                default(Il2CppSystem.Nullable<Color>),
+                true);
         }
 
         private void UpdateAllMarkers()
@@ -1026,7 +1291,8 @@ namespace BossNotifier
 
                     int layerMask = (1 << 12) | (1 << 11) | (1 << 16);
 
-                    if (Physics.Raycast(playerPos, direction.normalized, out RaycastHit hit, distance, layerMask))
+                    RaycastHit hit;
+                    if (Physics.Raycast(playerPos, direction.normalized, out hit, distance, layerMask))
                     {
                         if (hit.distance < distance - 1f)
                         {
@@ -1142,19 +1408,53 @@ namespace BossNotifier
         #region Notifications
         private void SendBossNotifications()
         {
-            if (!ShouldFunction()) return;
-            if (intelCenterLevel < BossNotifierPlugin.intelCenterUnlockLevel.Value) return;
-
-            if (bossNotificationMessages.Count == 0)
+            if (!ShouldFunction())
             {
-                NotificationManager.DisplayMessageNotification("No Bosses Located", ENotificationDurationType.Long);
+                BossNotifierPlugin.LogMessage(LogLevel.Info, "Boss notifications suppressed (Fika client, not host).");
+                return;
+            }
+            if (intelCenterLevel < BossNotifierPlugin.intelCenterUnlockLevel.Value)
+            {
+                BossNotifierPlugin.LogMessage(LogLevel.Info, $"Boss notifications suppressed: Intel Center level {intelCenterLevel} < required {BossNotifierPlugin.intelCenterUnlockLevel.Value}.");
                 return;
             }
 
+            if (bossNotificationMessages == null || bossNotificationMessages.Count == 0)
+            {
+                BossNotifierPlugin.LogMessage(LogLevel.Info, "Boss notifications: no bosses located, showing placeholder.");
+                ShowNotification("No Bosses Located", ENotificationDurationType.Long);
+                return;
+            }
+
+            BossNotifierPlugin.LogMessage(LogLevel.Info, $"Boss notifications: displaying {bossNotificationMessages.Count} message(s).");
             foreach (var bossMessage in bossNotificationMessages)
             {
-                NotificationManager.DisplayMessageNotification(bossMessage, ENotificationDurationType.Long);
+                BossNotifierPlugin.LogMessage(LogLevel.Info, $"  -> {bossMessage}");
+                ShowNotification(bossMessage, ENotificationDurationType.Long);
             }
+        }
+
+        // Prefer the zone the boss really spawned in, and fall back to the candidate list from its
+        // spawn entry. Called often, so the diagnostic is emitted once per boss.
+        private static readonly HashSet<string> locationLogged = new HashSet<string>();
+
+        private static string ResolveLocation(string bossName, string fallback)
+        {
+            BotOwner owner;
+            if (BotBossPatch.bossOwners.TryGetValue(bossName, out owner))
+            {
+                string zone = BotBossPatch.ResolveSpawnZone(owner);
+                if (!string.IsNullOrEmpty(zone))
+                {
+                    if (locationLogged.Add(bossName))
+                    {
+                        BossNotifierPlugin.LogMessage(LogLevel.Info, $"{bossName}: using actual spawn zone '{zone}' (candidates were '{fallback}')");
+                    }
+                    return zone;
+                }
+            }
+
+            return fallback;
         }
 
         public void GenerateBossNotifications()
@@ -1174,12 +1474,17 @@ namespace BossNotifier
             {
                 if (isDayTime && bossSpawn.Key.Equals("Cultists")) continue;
 
+                // Report the zone the boss actually spawned in. Its BossLocationSpawn entry only
+                // lists every zone the boss may use, so without this the message stays vague
+                // ("Dormitory, Gas Station, Scav Base") instead of naming the real place.
+                string location = ResolveLocation(bossSpawn.Key, bossSpawn.Value);
+
                 // Handle Goons as a group
                 if (BossNotifierPlugin.goonMembers.Contains(bossSpawn.Key))
                 {
                     if (!goonsNotificationAdded)
                     {
-                        goonsLocation = bossSpawn.Value;
+                        goonsLocation = location;
                         goonsDetected = BotBossPatch.spawnedBosses.Contains("Knight") ||
                                        BotBossPatch.spawnedBosses.Contains("Big Pipe") ||
                                        BotBossPatch.spawnedBosses.Contains("Birdeye");
@@ -1228,13 +1533,13 @@ namespace BossNotifier
                 {
                     notificationMessage = $"{bossSpawn.Key} {(BossNotifierPlugin.pluralBosses.Contains(bossSpawn.Key) ? "have" : "has")} been eliminated. ☠";
                 }
-                else if (!isLocationUnlocked || bossSpawn.Value == null || bossSpawn.Value.Equals(""))
+                else if (!isLocationUnlocked || string.IsNullOrEmpty(location))
                 {
                     notificationMessage = $"{bossSpawn.Key} {(BossNotifierPlugin.pluralBosses.Contains(bossSpawn.Key) ? "have" : "has")} been located.{(isDetectionUnlocked && isDetected ? " ✓" : "")}";
                 }
                 else
                 {
-                    notificationMessage = $"{bossSpawn.Key} {(BossNotifierPlugin.pluralBosses.Contains(bossSpawn.Key) ? "have" : "has")} been located near {bossSpawn.Value}.{(isDetectionUnlocked && isDetected ? " ✓" : "")}";
+                    notificationMessage = $"{bossSpawn.Key} {(BossNotifierPlugin.pluralBosses.Contains(bossSpawn.Key) ? "have" : "has")} been located near {location}.{(isDetectionUnlocked && isDetected ? " ✓" : "")}";
                 }
                 bossNotificationMessages.Add(notificationMessage);
             }
@@ -1257,26 +1562,36 @@ namespace BossNotifier
         {
             if (_gameWorld != null)
             {
-                _gameWorld.OnPersonAdd -= OnPersonAdd;
+                if (_onPersonAddHandler != null) _gameWorld.OnPersonAdd -= _onPersonAddHandler;
+                _onPersonAddHandler = null;
             }
 
-            foreach (var markerInfo in _bossMarkers.Values)
+            if (_bossMarkers != null)
             {
-                if (markerInfo.MarkerObject != null)
+                foreach (var markerInfo in _bossMarkers.Values)
                 {
-                    Destroy(markerInfo.MarkerObject);
+                    if (markerInfo.MarkerObject != null)
+                    {
+                        Destroy(markerInfo.MarkerObject);
+                    }
+                    if (markerInfo.Player != null)
+                    {
+                        markerInfo.Player.OnPlayerDeadOrUnspawn -= OnBossDeadOrUnspawn;
+                    }
                 }
-                if (markerInfo.Player != null)
-                {
-                    markerInfo.Player.OnPlayerDeadOrUnspawn -= OnBossDeadOrUnspawn;
-                }
+                _bossMarkers.Clear();
             }
-            _bossMarkers.Clear();
+
+            // Interop can hand out a second wrapper for the same native object, so reference
+            // equality would miss the match and leave a dead instance behind.
+            if (Instance != null && Instance.Pointer == Pointer) Instance = null;
 
             BossLocationSpawnPatch.bossesInRaid.Clear();
             BotBossPatch.spawnedBosses.Clear();
             BotBossPatch.deadBosses.Clear();
             BotBossPatch.vicinityNotificationsSent.Clear(); // FIX: Clear this too
+            BotBossPatch.bossOwners.Clear();
+            locationLogged.Clear();
             BossNotifierPlugin.groupSeenCount.Clear();
             BossNotifierPlugin.groupDeadCount.Clear();
 
@@ -1291,23 +1606,22 @@ namespace BossNotifier
             if (BossNotifierPlugin.FikaClientTypeProperty == null) return true;
             return (int)BossNotifierPlugin.FikaClientTypeProperty.GetValue(null) == 2;
         }
-
-        bool IsKeyPressed(KeyboardShortcut key)
-        {
-            if (!UnityInput.Current.GetKeyDown(key.MainKey))
-            {
-                return false;
-            }
-            foreach (var modifier in key.Modifiers)
-            {
-                if (!UnityInput.Current.GetKey(modifier))
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
         #endregion
+    }
+    #endregion
+
+    #region Component extensions
+    internal static class ComponentExtensions
+    {
+        // BepInEx 6 ships no GetOrAddComponent helper, and IL2CPP has no
+        // AddComponent(System.Type) overload, so roll our own.
+        internal static T GetOrAddComponent<T>(this Component component) where T : Component
+        {
+            T existing = component.GetComponent<T>();
+            if (existing != null) return existing;
+
+            return component.gameObject.AddComponent<T>();
+        }
     }
     #endregion
 }
